@@ -1,0 +1,144 @@
+---
+# apiVersion: v1 # Keeping it commented for now for the sake of simplicity but this is required to enable https for k8s application . It configures the Ingress resource to use TLS (Transport Layer Security) for encrypting traffic between the client (such as a browser) and the server (your application)
+# kind: Secret
+# metadata:
+#   name: backend-api-tls
+#   namespace: default
+# data:
+#   tls.crt: base64_encoded_certificate
+#   tls.key: base64_encoded_private_key
+# type: kubernetes.io/tls
+---
+
+---
+# ConfigMap for environment variables
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-config
+type: Opaque
+data:
+  DATABASE_URL: "postgresql://XXXXX:XXXXd@XXXX:5432/XXXXX" #This can be base64 encoded and also this also be automounted using secrets-store-csi-driver
+
+---
+# Backend API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+spec:
+  replicas: 3  # Start with 3 replicas for high availability
+  selector:
+    matchLabels:
+      app: backend-api
+  template:
+    metadata:
+      labels:
+        app: backend-api
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:13
+        command: 
+          - /bin/sh
+          - -c
+          - until pg_isready -h postgres-service -p 5432 -U XXXX -d products; do echo waiting for database; sleep 2; done;
+        envFrom:
+        - configMapRef:
+            name: postgres-config
+        - secretRef:
+            name: postgres-secret
+      containers:
+      - name: backend-api
+        image: devd/backend-api:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: backend-config
+              key: DATABASE_URL
+#        envFrom:
+#        - configMapRef:
+#            name: postgres-config            # Load ConfigMap as environment variables
+#        - secretRef:
+#            name: postgres-secret
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5           # Initial delay before the first probe
+          periodSeconds: 10               # Check readiness every 1 second
+        livenessProbe:
+          httpGet:                        # LivenessProbe using TCP requests
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15         # Initial delay before the first probe
+          periodSeconds: 20               # Probe period (default)
+
+---
+# Backend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+spec:
+  selector:
+    app: backend-api
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: ClusterIP 
+---
+# Horizontal Pod Autoscaling
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-api-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend-api
+  minReplicas: 3   # Minimum number of replicas
+  maxReplicas: 10   # Maximum number of replicas in case of high load
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70  # Target average CPU utilization
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: backend-api-ingress
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - host: products.example.com  # Your domain name for the application
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-api-service
+                port:
+                  number: 80
+  # tls:  # Configure HTTPS (optional)
+  #   - hosts:
+  #       - shop.example.com
+  #     secretName: backend-api-tls  # Pre-configured TLS secret for HTTPS which I am keeping commented for the sake of simplicity for now. t configures the Ingress resource to use TLS (Transport Layer Security) for encrypting traffic between the client (such as a browser) and the server (your application).
